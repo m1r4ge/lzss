@@ -1,233 +1,307 @@
 /**************************************************************
-    LZSS.C -- A Data Compression Program
-    (tab = 4 spaces)
+ LZSS.C -- A Data Compression Program
 ***************************************************************
     4/6/1989 Haruhiko Okumura
     Use, distribute, and modify this program freely.
     Please send me your improved versions.
-        PC-VAN        SCIENCE
-        NIFTY-Serve    PAF01022
-        CompuServe    74050,1022
+        PC-VAN      SCIENCE
+        NIFTY-Serve PAF01022
+        CompuServe  74050,1022
+
 **************************************************************/
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
 
-#define N         4096    /* size of ring buffer */
-#define F           18    /* upper limit for match_length */
-#define THRESHOLD    2    /* encode string into position and length if match_length is greater than this */
-#define NIL          N    /* index for root of binary search trees */
+#define N         4096  /* size of ring buffer - must be power of 2 */
+#define F         18    /* upper limit for match_length */
+#define THRESHOLD 2     /* encode string into position and length
+                           if match_length is greater than this */
+#define NIL       N     /* index for root of binary search trees */
 
-/* of longest match.  These are set by the InsertNode() procedure. */
-static int match_position;
-static int match_length;
+struct encode_state {
+    /*
+     * left & right children & parent. These constitute binary search trees.
+     */
+    int lchild[N + 1], rchild[N + 257], parent[N + 1];
 
-static void InsertNode(unsigned char* text_buf, int* lson, int* rson, int* dad, int r)
-    /* Inserts string of length F, text_buf[r..r+F-1], into one of the
-       trees (text_buf[r]'th tree) and returns the longest-match position
-       and length via the global variables match_position and match_length.
-       If match_length = F, then removes the old node in favor of the new
-       one, because the old one will be deleted sooner.
-       Note r plays double role, as tree node and position in buffer. */
+    /* ring buffer of size N, with extra F-1 bytes to aid string comparison */
+    u_int8_t text_buf[N + F - 1];
+
+    /*
+     * match_length of longest match.
+     * These are set by the insert_node() procedure.
+     */
+    int match_position, match_length;
+};
+
+int decompress_lzss(u_int8_t *dst, u_int8_t *src, u_int32_t srclen)
 {
-    int  i, p, cmp;
-    unsigned char  *key;
-
-    cmp = 1;  key = &text_buf[r];  p = N + 1 + key[0];
-    rson[r] = lson[r] = NIL;  match_length = 0;
-    for ( ; ; ) {
-        if (cmp >= 0) {
-            if (rson[p] != NIL) p = rson[p];
-            else {  rson[p] = r;  dad[r] = p;  return;  }
-        } else {
-            if (lson[p] != NIL) p = lson[p];
-            else {  lson[p] = r;  dad[r] = p;  return;  }
-        }
-        for (i = 1; i < F; i++)
-            if ((cmp = key[i] - text_buf[p + i]) != 0)  break;
-        if (i > match_length) {
-            match_position = p;
-            if ((match_length = i) >= F)  break;
-        }
-    }
-    dad[r] = dad[p];  lson[r] = lson[p];  rson[r] = rson[p];
-    dad[lson[p]] = r;  dad[rson[p]] = r;
-    if (rson[dad[p]] == p) rson[dad[p]] = r;
-    else                  lson[dad[p]] = r;
-    dad[p] = NIL;  /* remove p */
-}
-
-static void DeleteNode(int* lson, int* rson, int* dad, int p)  /* deletes node p from tree */
-{
-    int  q;
-    
-    if (dad[p] == NIL) return;  /* not in tree */
-    if (rson[p] == NIL) q = lson[p];
-    else if (lson[p] == NIL) q = rson[p];
-    else {
-        q = lson[p];
-        if (rson[q] != NIL) {
-            do {  q = rson[q];  } while (rson[q] != NIL);
-            rson[dad[q]] = lson[q];  dad[lson[q]] = dad[q];
-            lson[q] = lson[p];  dad[lson[p]] = q;
-        }
-        rson[q] = rson[p];  dad[rson[p]] = q;
-    }
-    dad[q] = dad[p];
-    if (rson[dad[p]] == p) rson[dad[p]] = q;  else lson[dad[p]] = q;
-    dad[p] = NIL;
-}
-
-#define _get(c) \
-	if (! ilen) {\
-		c = EOF;\
-		break;\
-	}\
-	c = *istr;\
-	++istr;\
-	--ilen
-
-#define _put(c) \
-	*ostr = c;\
-	++ostr;\
-	--olen
-
-size_t Encode(size_t ilen, char* istr, size_t olen, char* ostr)
-{
-    int  i, c, len, r, s, last_match_length, code_buf_ptr;
-    unsigned char  code_buf[17], mask;
-	size_t codesize = 0;
-	int lson[N + 1], rson[N + 257], dad[N + 1]; /* left & right children & parents -- These constitute binary search trees. */
-	unsigned char text_buf[N + F - 1];          /* ring buffer of size N, with extra F-1 bytes to facilitate string comparison */
-
-	match_position = 0;
-	match_length = 0;
-
-	if (ilen == 0) return 0;
-    
-    /* initialize trees */
-	/* For i = 0 to N - 1, rson[i] and lson[i] will be the right and
-    left children of node i.  These nodes need not be initialized.
-    Also, dad[i] is the parent of node i.  These are initialized to
-    NIL (= N), which stands for 'not used.'
-    For i = 0 to 255, rson[N + i + 1] is the root of the tree
-    for strings that begin with character i.  These are initialized
-    to NIL.  Note there are 256 trees. */
-    for (i = N + 1; i <= N + 256; i++) rson[i] = NIL;
-    for (i = 0; i < N; i++) dad[i] = NIL;
-
-    code_buf[0] = 0;  /* code_buf[1..16] saves eight units of code, and
-        code_buf[0] works as eight flags, "1" representing that the unit
-        is an unencoded letter (1 byte), "0" a position-and-length pair
-        (2 bytes).  Thus, eight units require at most 16 bytes of code. */
-    code_buf_ptr = mask = 1;
-    s = 0;  r = N - F;
-    for (i = s; i < r; i++) text_buf[i] = 0;  /* Clear the buffer with
-        any character that will appear often. */
-    for (len = 0; len < F && ilen; len++) {
-		_get(c);
-        text_buf[r + len] = c;
-		/* Read F bytes into the last F bytes of the buffer */
-	}
-    for (i = 1; i <= F; i++) InsertNode(text_buf, lson, rson, dad, r - i);  /* Insert the F strings,
-        each of which begins with one or more 'space' characters.  Note
-        the order in which these strings are inserted.  This way,
-        degenerate trees will be less likely to occur. */
-    InsertNode(text_buf, lson, rson, dad, r);  /* Finally, insert the whole string just read. The global variables match_length and match_position are set. */
-    do {
-        if (match_length > len) match_length = len;  /* match_length may be spuriously long near the end of text. */
-        if (match_length <= THRESHOLD) {
-            match_length = 1;  /* Not long enough match.  Send one byte. */
-            code_buf[0] |= mask;  /* 'send one byte' flag */
-            code_buf[code_buf_ptr++] = text_buf[r];  /* Send uncoded. */
-        } else {
-            code_buf[code_buf_ptr++] = (unsigned char) match_position;
-            code_buf[code_buf_ptr++] = (unsigned char)
-                (((match_position >> 4) & 0xf0)
-             | (match_length - (THRESHOLD + 1)));  /* Send position and
-                    length pair. Note match_length > THRESHOLD. */
-        }
-        if ((mask <<= 1) == 0) {  /* Shift mask left one bit. */
-            for (i = 0; i < code_buf_ptr; i++) {  /* Send at most 8 units of */
-                _put(code_buf[i]);    /* code together */
-			}
-            codesize += code_buf_ptr;
-            code_buf[0] = 0;  code_buf_ptr = mask = 1;
-        }
-        last_match_length = match_length;
-        for (i = 0; i < last_match_length && ilen; i++) {
-			_get(c);
-            DeleteNode(lson, rson, dad, s);        /* Delete old strings and */
-            text_buf[s] = c;    /* read new bytes */
-            if (s < F - 1) text_buf[s + N] = c;  /* If the position is
-                near the end of buffer, extend the buffer to make
-                string comparison easier. */
-            s = (s + 1) & (N - 1);  r = (r + 1) & (N - 1);
-                /* Since this is a ring buffer, increment the position
-                   modulo N. */
-            InsertNode(text_buf, lson, rson, dad, r);    /* Register the string in text_buf[r..r+F-1] */
-        }
-        while (i++ < last_match_length) {    /* After the end of text, */
-            DeleteNode(lson, rson, dad, s);                    /* no need to read, but */
-            s = (s + 1) & (N - 1);  r = (r + 1) & (N - 1);
-            if (--len) InsertNode(text_buf, lson, rson, dad, r);        /* buffer may not be empty. */
-        }
-    } while (len > 0);    /* until length of string to be processed is zero */
-    if (code_buf_ptr > 1) {        /* Send remaining code. */
-        for (i = 0; i < code_buf_ptr; i++) {
-			_put(code_buf[i]);
-		}
-        codesize += code_buf_ptr;
-    }
-
-	return codesize;
-}
-
-#undef _put
-#define _put(c) \
-	if (*olen == limit) {\
-		limit *= 2;\
-		ostr = realloc(ostr, limit);\
-	}\
-    ostr[*olen] = c;\
-	*olen += 1
-
-// note: should free the returned ptr
-char* Decode(size_t ilen, unsigned char* istr, size_t *olen)    /* Just the reverse of Encode(). */
-{
-	unsigned char text_buf[N + F - 1];          /* ring buffer of size N, with extra F-1 bytes to facilitate string comparison */
+    /* ring buffer of size N, with extra F-1 bytes to aid string comparison */
+    u_int8_t text_buf[N + F - 1];
+    u_int8_t *dststart = dst;
+    u_int8_t *srcend = src + srclen;
     int  i, j, k, r, c;
-    unsigned int  flags;
-	char* ostr = malloc(ilen);
-	int limit = ilen;
-	*olen = 0;
+    unsigned int flags;
     
-    for (i = 0; i < N - F; i++) text_buf[i] = 0;
-    r = N - F;  flags = 0;
+    dst = dststart;
+    srcend = src + srclen;
+    for (i = 0; i < N - F; i++)
+        text_buf[i] = ' ';
+    r = N - F;
+    flags = 0;
     for ( ; ; ) {
-        if (((flags >>= 1) & 256) == 0) {
-			_get(c);
-            flags = c | 0xff00;        /* uses higher byte cleverly */
-        }                            /* to count eight */
+        if (((flags >>= 1) & 0x100) == 0) {
+            if (src < srcend) c = *src++; else break;
+            flags = c | 0xFF00;  /* uses higher byte cleverly */
+        }   /* to count eight */
         if (flags & 1) {
-            _get(c);
-			_put(c);
-			text_buf[r++] = c;  r &= (N - 1);
+            if (src < srcend) c = *src++; else break;
+            *dst++ = c;
+            text_buf[r++] = c;
+            r &= (N - 1);
         } else {
-            _get(i);
-            _get(j);
-            i |= ((j & 0xf0) << 4);  j = (j & 0x0f) + THRESHOLD;
+            if (src < srcend) i = *src++; else break;
+            if (src < srcend) j = *src++; else break;
+            i |= ((j & 0xF0) << 4);
+            j  =  (j & 0x0F) + THRESHOLD;
             for (k = 0; k <= j; k++) {
                 c = text_buf[(i + k) & (N - 1)];
-                _put(c);
-				text_buf[r++] = c;  r &= (N - 1);
+                *dst++ = c;
+                text_buf[r++] = c;
+                r &= (N - 1);
             }
         }
     }
-	return ostr;
+    
+    return dst - dststart;
 }
 
-#undef _get
-#undef _put
+/*
+ * initialize state, mostly the trees
+ *
+ * For i = 0 to N - 1, rchild[i] and lchild[i] will be the right and left 
+ * children of node i.  These nodes need not be initialized.  Also, parent[i] 
+ * is the parent of node i.  These are initialized to NIL (= N), which stands 
+ * for 'not used.'  For i = 0 to 255, rchild[N + i + 1] is the root of the 
+ * tree for strings that begin with character i.  These are initialized to NIL. 
+ * Note there are 256 trees. */
+static void init_state(struct encode_state *sp)
+{
+    int  i;
 
+    bzero(sp, sizeof(*sp));
+
+    for (i = 0; i < N - F; i++)
+        sp->text_buf[i] = ' ';
+    for (i = N + 1; i <= N + 256; i++)
+        sp->rchild[i] = NIL;
+    for (i = 0; i < N; i++)
+        sp->parent[i] = NIL;
+}
+
+/*
+ * Inserts string of length F, text_buf[r..r+F-1], into one of the trees
+ * (text_buf[r]'th tree) and returns the longest-match position and length
+ * via the global variables match_position and match_length.
+ * If match_length = F, then removes the old node in favor of the new one,
+ * because the old one will be deleted sooner. Note r plays double role,
+ * as tree node and position in buffer.
+ */
+static void insert_node(struct encode_state *sp, int r)
+{
+    int  i, p, cmp;
+    u_int8_t  *key;
+
+    cmp = 1;
+    key = &sp->text_buf[r];
+    p = N + 1 + key[0];
+    sp->rchild[r] = sp->lchild[r] = NIL;
+    sp->match_length = 0;
+    for ( ; ; ) {
+        if (cmp >= 0) {
+            if (sp->rchild[p] != NIL)
+                p = sp->rchild[p];
+            else {
+                sp->rchild[p] = r; 
+                sp->parent[r] = p;
+                return;
+            }
+        } else {
+            if (sp->lchild[p] != NIL)
+                p = sp->lchild[p];
+            else {
+                sp->lchild[p] = r;
+                sp->parent[r] = p;
+                return;
+            }
+        }
+        for (i = 1; i < F; i++) {
+            if ((cmp = key[i] - sp->text_buf[p + i]) != 0)
+                break;
+        }
+        if (i > sp->match_length) {
+            sp->match_position = p;
+            if ((sp->match_length = i) >= F)
+                break;
+        }
+    }
+    sp->parent[r] = sp->parent[p];
+    sp->lchild[r] = sp->lchild[p];
+    sp->rchild[r] = sp->rchild[p];
+    sp->parent[sp->lchild[p]] = r;
+    sp->parent[sp->rchild[p]] = r;
+    if (sp->rchild[sp->parent[p]] == p)
+        sp->rchild[sp->parent[p]] = r;
+    else
+        sp->lchild[sp->parent[p]] = r;
+    sp->parent[p] = NIL;  /* remove p */
+}
+
+/* deletes node p from tree */
+static void delete_node(struct encode_state *sp, int p)
+{
+    int  q;
+    
+    if (sp->parent[p] == NIL)
+        return;  /* not in tree */
+    if (sp->rchild[p] == NIL)
+        q = sp->lchild[p];
+    else if (sp->lchild[p] == NIL)
+        q = sp->rchild[p];
+    else {
+        q = sp->lchild[p];
+        if (sp->rchild[q] != NIL) {
+            do {
+                q = sp->rchild[q];
+            } while (sp->rchild[q] != NIL);
+            sp->rchild[sp->parent[q]] = sp->lchild[q];
+            sp->parent[sp->lchild[q]] = sp->parent[q];
+            sp->lchild[q] = sp->lchild[p];
+            sp->parent[sp->lchild[p]] = q;
+        }
+        sp->rchild[q] = sp->rchild[p];
+        sp->parent[sp->rchild[p]] = q;
+    }
+    sp->parent[q] = sp->parent[p];
+    if (sp->rchild[sp->parent[p]] == p)
+        sp->rchild[sp->parent[p]] = q;
+    else
+        sp->lchild[sp->parent[p]] = q;
+    sp->parent[p] = NIL;
+}
+
+u_int8_t *compress_lzss(u_int8_t *dst, u_int32_t dstlen, u_int8_t *src, u_int32_t srcLen)
+{
+    /* Encoding state, mostly tree but some current match stuff */
+    struct encode_state *sp;
+
+    int  i, c, len, r, s, last_match_length, code_buf_ptr;
+    u_int8_t code_buf[17], mask;
+    u_int8_t *srcend = src + srcLen;
+    u_int8_t *dstend = dst + dstlen;
+
+    /* initialize trees */
+    sp = (struct encode_state *) malloc(sizeof(*sp));
+    init_state(sp);
+
+    /*
+     * code_buf[1..16] saves eight units of code, and code_buf[0] works
+     * as eight flags, "1" representing that the unit is an unencoded
+     * letter (1 byte), "0" a position-and-length pair (2 bytes).
+     * Thus, eight units require at most 16 bytes of code.
+     */
+    code_buf[0] = 0;
+    code_buf_ptr = mask = 1;
+
+    /* Clear the buffer with any character that will appear often. */
+    s = 0;  r = N - F;
+
+    /* Read F bytes into the last F bytes of the buffer */
+    for (len = 0; len < F && src < srcend; len++)
+        sp->text_buf[r + len] = *src++;  
+    if (!len)
+        return (void *) 0;  /* text of size zero */
+
+    /*
+     * Insert the F strings, each of which begins with one or more
+     * 'space' characters.  Note the order in which these strings are
+     * inserted.  This way, degenerate trees will be less likely to occur.
+     */
+    for (i = 1; i <= F; i++)
+        insert_node(sp, r - i); 
+
+    /*
+     * Finally, insert the whole string just read.
+     * The global variables match_length and match_position are set.
+     */
+    insert_node(sp, r);
+    do {
+        /* match_length may be spuriously long near the end of text. */
+        if (sp->match_length > len)
+            sp->match_length = len;
+        if (sp->match_length <= THRESHOLD) {
+            sp->match_length = 1;  /* Not long enough match.  Send one byte. */
+            code_buf[0] |= mask;  /* 'send one byte' flag */
+            code_buf[code_buf_ptr++] = sp->text_buf[r];  /* Send uncoded. */
+        } else {
+            /* Send position and length pair. Note match_length > THRESHOLD. */
+            code_buf[code_buf_ptr++] = (u_int8_t) sp->match_position;
+            code_buf[code_buf_ptr++] = (u_int8_t)
+                ( ((sp->match_position >> 4) & 0xF0)
+                |  (sp->match_length - (THRESHOLD + 1)) );
+        }
+        if ((mask <<= 1) == 0) {  /* Shift mask left one bit. */
+                /* Send at most 8 units of code together */
+            for (i = 0; i < code_buf_ptr; i++)
+                if (dst < dstend)
+                    *dst++ = code_buf[i]; 
+                else
+                    return (void *) 0;
+            code_buf[0] = 0;
+            code_buf_ptr = mask = 1;
+        }
+        last_match_length = sp->match_length;
+        for (i = 0; i < last_match_length && src < srcend; i++) {
+            delete_node(sp, s);    /* Delete old strings and */
+            c = *src++;
+            sp->text_buf[s] = c;    /* read new bytes */
+
+            /*
+             * If the position is near the end of buffer, extend the buffer
+             * to make string comparison easier.
+             */
+            if (s < F - 1)
+                sp->text_buf[s + N] = c;
+
+            /* Since this is a ring buffer, increment the position modulo N. */
+            s = (s + 1) & (N - 1);
+            r = (r + 1) & (N - 1);
+
+            /* Register the string in text_buf[r..r+F-1] */
+            insert_node(sp, r); 
+        }
+        while (i++ < last_match_length) {
+        delete_node(sp, s);
+
+            /* After the end of text, no need to read, */
+            s = (s + 1) & (N - 1); 
+            r = (r + 1) & (N - 1);
+            /* but buffer may not be empty. */
+            if (--len)
+                insert_node(sp, r);
+        }
+    } while (len > 0);   /* until length of string to be processed is zero */
+
+    if (code_buf_ptr > 1) {    /* Send remaining code. */
+        for (i = 0; i < code_buf_ptr; i++)
+            if (dst < dstend)
+                *dst++ = code_buf[i]; 
+            else
+                return (void *) 0;
+    }
+
+    return dst;
+}
