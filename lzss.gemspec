@@ -7,7 +7,7 @@ Gem::Specification.new do |s|
   s.summary = "lzss compress algorithm for ruby"
   s.required_ruby_version = ">=1.9.0"
 
-  s.files = %w[src src/lzss.c src/lzss-ext.c src/extconf.rb example example/example.rb lib lib/compress]
+  s.files = %w[src src/lzss.c src/lzss-ext.c src/extconf.rb example example/example.rb]
   s.extensions = ["src/extconf.rb"]
   s.require_paths = ["lib"]
   s.rubygems_version = '1.3.6'
