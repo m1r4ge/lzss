@@ -37,46 +37,81 @@ struct encode_state {
     int match_position, match_length;
 };
 
-int decompress_lzss(u_int8_t *dst, u_int8_t *src, u_int32_t srclen)
+int decompress_lzss(u_int8_t **dst, u_int8_t *src, u_int32_t srclen)
 {
+    u_int8_t *buf = malloc(srclen);
+    u_int32_t buflen = srclen;
+    u_int32_t reslen = 0;
+
     /* ring buffer of size N, with extra F-1 bytes to aid string comparison */
-    u_int8_t text_buf[N + F - 1];
-    u_int8_t *dststart = dst;
+    u_int8_t text_buf[N + F - 1];    
     u_int8_t *srcend = src + srclen;
     int  i, j, k, r, c;
     unsigned int flags;
     
-    dst = dststart;
     srcend = src + srclen;
+    
     for (i = 0; i < N - F; i++)
         text_buf[i] = ' ';
+    
     r = N - F;
     flags = 0;
+    
     for ( ; ; ) {
         if (((flags >>= 1) & 0x100) == 0) {
-            if (src < srcend) c = *src++; else break;
+            if (src < srcend) 
+                c = *src++; 
+            else 
+                break;
+            
             flags = c | 0xFF00;  /* uses higher byte cleverly */
         }   /* to count eight */
+
         if (flags & 1) {
-            if (src < srcend) c = *src++; else break;
-            *dst++ = c;
+            if (src < srcend) 
+                c = *src++; 
+            else 
+                break;
+
+            if (reslen == buflen) {
+                buflen *= 2;
+                buf = realloc(buf, buflen);
+            }
+
+            buf[reslen++] = c;            
             text_buf[r++] = c;
             r &= (N - 1);
         } else {
-            if (src < srcend) i = *src++; else break;
-            if (src < srcend) j = *src++; else break;
+            if (src < srcend) 
+                i = *src++; 
+            else 
+                break;
+            
+            if (src < srcend) 
+                j = *src++; 
+            else 
+                break;
+
             i |= ((j & 0xF0) << 4);
             j  =  (j & 0x0F) + THRESHOLD;
+            
             for (k = 0; k <= j; k++) {
                 c = text_buf[(i + k) & (N - 1)];
-                *dst++ = c;
+                
+                if (reslen == buflen) {
+                    buflen *= 2;
+                    buf = realloc(buf, buflen);
+                }
+
+                buf[reslen++] = c;                
                 text_buf[r++] = c;
                 r &= (N - 1);
             }
         }
     }
     
-    return dst - dststart;
+    *dst = buf;
+    return reslen;
 }
 
 /*
@@ -193,14 +228,14 @@ static void delete_node(struct encode_state *sp, int p)
     sp->parent[p] = NIL;
 }
 
-u_int8_t *compress_lzss(u_int8_t *dst, u_int32_t dstlen, u_int8_t *src, u_int32_t srcLen)
+u_int8_t *compress_lzss(u_int8_t *dst, u_int32_t dstlen, u_int8_t *src, u_int32_t srclen)
 {
     /* Encoding state, mostly tree but some current match stuff */
     struct encode_state *sp;
 
     int  i, c, len, r, s, last_match_length, code_buf_ptr;
     u_int8_t code_buf[17], mask;
-    u_int8_t *srcend = src + srcLen;
+    u_int8_t *srcend = src + srclen;
     u_int8_t *dstend = dst + dstlen;
 
     /* initialize trees */

@@ -1,23 +1,33 @@
 #include <ruby.h>
+#include <ctype.h>
+#include <stdlib.h>
 
-size_t Encode(size_t ilen, char* istr, size_t olen, char* ostr);
-// note: should free the returned ptr
-char* Decode(size_t ilen, unsigned char* istr, size_t *olen);
+// from lzss.c
+int decompress_lzss(u_int8_t **dst, u_int8_t *src, u_int32_t srclen);
+u_int8_t *compress_lzss(u_int8_t *dst, u_int32_t dstlen, u_int8_t *src, u_int32_t srcLen);
 
 static VALUE encode(VALUE self, VALUE str) {
-	size_t ilen = RSTRING_LEN(str);
-	char* buff = (char*)malloc(ilen * 2);
-	size_t olen = Encode(RSTRING_LEN(str), RSTRING_PTR(str), ilen * 2, buff);
-	VALUE ret = rb_str_new(buff, olen);
-	free(buff);
+	u_int32_t srclen = RSTRING_LEN(str);
+	u_int8_t *dst = (u_int8_t *) malloc(srclen * 2);
+	u_int8_t *end = compress_lzss(dst, srclen * 2, 
+		RSTRING_PTR(str), RSTRING_LEN(str));
+	
+	VALUE ret = Qnil;
+
+	if (end) {
+		int compressed_len = end - dst;
+		ret = rb_str_new(dst, compressed_len);
+	}
+
+	free(dst);
 	return ret;
 }
 
 static VALUE decode(VALUE self, VALUE str) {
-	size_t olen = 0;
-	char* buff = Decode(RSTRING_LEN(str), RSTRING_PTR(str), &olen);
-	VALUE ret = rb_str_new(buff, olen);
-	free(buff);
+	u_int8_t *dst = NULL;
+	u_int32_t len = decompress_lzss(&dst, RSTRING_PTR(str), RSTRING_LEN(str));
+	VALUE ret = rb_str_new(dst, len);
+	free(dst);
 	return ret;
 }
 
